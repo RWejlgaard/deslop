@@ -1,7 +1,6 @@
-# deslop
+# de-slop
 
-Terminal tool for rewriting markdown (for example AI generated content) in your
-own words, one paragraph at a time.
+Rewrite AI-generated markdown files one paragraph at a time
 
 ## Usage
 
