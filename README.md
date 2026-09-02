@@ -38,3 +38,7 @@ Committing an empty editor drops that paragraph from the output.
 ```
 cargo build --release
 ```
+
+## Screenshot
+
+![](./.imgs/main_screen.png)
