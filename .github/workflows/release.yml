@@ -1,0 +1,174 @@
+name: Release
+
+# Squash-merged PRs land as a single commit on main. Its subject line drives
+# the release:
+#   major: ...   -> major version bump (breaking change)
+#   feat: ...    -> minor version bump (new feature)
+#   fix: ...     -> patch version bump (bug fix)
+#   chore: ...   -> no release
+#   anything else -> no release
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    # The version-bump commit itself carries [skip ci], so GitHub normally
+    # never schedules this workflow for it. This check is a second line of
+    # defense (e.g. against manual re-runs).
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine release plan
+        id: plan
+        run: |
+          set -euo pipefail
+
+          subject="$(git log -1 --pretty=%s)"
+          echo "Commit subject: $subject"
+
+          if echo "$subject" | grep -qE '^major(\(.+\))?!?:'; then
+            bump=major
+          elif echo "$subject" | grep -qE '^feat(\(.+\))?!?:'; then
+            bump=minor
+          elif echo "$subject" | grep -qE '^fix(\(.+\))?!?:'; then
+            bump=patch
+          else
+            bump=none
+          fi
+          echo "Bump: $bump"
+
+          if [ "$bump" = none ]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          last_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [ -n "$last_tag" ]; then
+            base="${last_tag#v}"
+          else
+            base="$(sed -nE 's/^version = "(.*)"/\1/p' Cargo.toml | head -1)"
+          fi
+          echo "Base version: $base"
+
+          IFS='.' read -r major minor patch <<< "$base"
+          case "$bump" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          new_version="${major}.${minor}.${patch}"
+
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "version=$new_version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$new_version" >> "$GITHUB_OUTPUT"
+
+  tag:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump version in Cargo.toml and Cargo.lock
+        run: |
+          set -euo pipefail
+          version="${{ needs.plan.outputs.version }}"
+
+          sed -i "0,/^version = \".*\"/s//version = \"${version}\"/" Cargo.toml
+
+          python3 - "$version" <<'EOF'
+          import re, sys
+          version = sys.argv[1]
+          with open("Cargo.lock") as f:
+              content = f.read()
+          content = re.sub(
+              '(name = "deslop"\nversion = ")[^"]*(")',
+              lambda m: f'{m.group(1)}{version}{m.group(2)}',
+              content,
+              count=1,
+          )
+          with open("Cargo.lock", "w") as f:
+              f.write(content)
+          EOF
+
+      - name: Commit and tag
+        run: |
+          set -euo pipefail
+          tag="${{ needs.plan.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(release): ${tag} [skip ci]"
+          git tag -a "$tag" -m "Release $tag"
+          git push origin HEAD:main
+          git push origin "$tag"
+
+  release:
+    needs: tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.tag.outputs.tag }}
+
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          ref: refs/tags/${{ needs.tag.outputs.tag }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: [tag, release]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+          - target: universal-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.tag.outputs.tag }}
+
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: deslop
+          target: ${{ matrix.target }}
+          archive: deslop-$tag-$target
+          checksum: sha256
+          ref: refs/tags/${{ needs.tag.outputs.tag }}
+          token: ${{ secrets.GITHUB_TOKEN }}
