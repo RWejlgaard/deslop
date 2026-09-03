@@ -7,6 +7,9 @@ name: Release
 #   fix: ...     -> patch version bump (bug fix)
 #   chore: ...   -> no release
 #   anything else -> no release
+#
+# All platform builds must succeed before anything is tagged or released:
+# plan -> build (matrix) -> tag -> release.
 on:
   push:
     branches: [main]
@@ -78,9 +81,73 @@ jobs:
           echo "version=$new_version" >> "$GITHUB_OUTPUT"
           echo "tag=v$new_version" >> "$GITHUB_OUTPUT"
 
-  tag:
+  build:
     needs: plan
     if: needs.plan.outputs.release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Bake the version that will be tagged into the binary (CARGO_PKG_VERSION)
+      # without committing it -- the real, committed bump happens in `tag`,
+      # only after every platform here has built successfully.
+      - name: Set crate version for this build
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i "0,/^version = \".*\"/s//version = \"${{ needs.plan.outputs.version }}\"/" Cargo.toml
+
+      - name: Add Rust target
+        if: "!matrix.cross"
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Set up cross-compilation toolchain
+        if: matrix.cross
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          src="target/${{ matrix.target }}/release/deslop"
+          dest="dist/deslop-${{ matrix.target }}"
+          if [[ "${{ matrix.target }}" == *-windows-* ]]; then
+            src="${src}.exe"
+            dest="${dest}.exe"
+          fi
+          cp "$src" "$dest"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  tag:
+    needs: [plan, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -126,7 +193,7 @@ jobs:
           git push origin "$tag"
 
   release:
-    needs: tag
+    needs: [tag, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -135,40 +202,16 @@ jobs:
         with:
           ref: ${{ needs.tag.outputs.tag }}
 
-      - uses: taiki-e/create-gh-release-action@v1
+      - uses: actions/download-artifact@v4
         with:
-          ref: refs/tags/${{ needs.tag.outputs.tag }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
 
-  build:
-    needs: [tag, release]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-          - target: aarch64-pc-windows-msvc
-            os: windows-latest
-          - target: universal-apple-darwin
-            os: macos-latest
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.tag.outputs.tag }}
-
-      - uses: taiki-e/upload-rust-binary-action@v1
-        with:
-          bin: deslop
-          target: ${{ matrix.target }}
-          archive: deslop-$tag-$target
-          checksum: sha256
-          ref: refs/tags/${{ needs.tag.outputs.tag }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create release and attach binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.tag.outputs.tag }}"
+          gh release create "$tag" --title "$tag" --generate-notes dist/*
