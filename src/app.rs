@@ -75,12 +75,16 @@ impl App {
                         return Ok(Some(self.output.clone()));
                     }
                 },
-                (true, KeyCode::Char('k')) if self.mode == Mode::Chunk => {
-                    self.editor = make_editor(&self.chunks[self.idx].clone());
-                    self.commit_and_next();
+                (true, KeyCode::Char('k')) => {
+                    if self.mode == Mode::Chunk {
+                        self.editor = make_editor(&self.chunks[self.idx]);
+                        self.commit_and_next();
+                    }
                 }
-                (true, KeyCode::Char('o')) if self.mode == Mode::Chunk => {
-                    self.editor = make_editor(&self.chunks[self.idx].clone());
+                (true, KeyCode::Char('o')) => {
+                    if self.mode == Mode::Chunk {
+                        self.editor = make_editor(&self.chunks[self.idx]);
+                    }
                 }
                 (true, KeyCode::Char('p')) => self.go_back(),
                 _ => {

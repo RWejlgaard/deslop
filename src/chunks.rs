@@ -4,23 +4,29 @@
 pub fn split_chunks(text: &str) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current: Vec<&str> = Vec::new();
-    let mut fence: Option<&str> = None;
+    let mut fence: Option<(char, usize)> = None;
 
     for line in text.lines() {
         let trimmed = line.trim_start();
 
-        if let Some(marker) = fence {
+        if let Some((marker, min_len)) = fence {
             current.push(line);
-            if trimmed.starts_with(marker) {
+            let run = trimmed.chars().take_while(|&c| c == marker).count();
+            if run >= min_len {
                 fence = None;
             }
             continue;
         }
 
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            fence = Some(&trimmed[..3]);
-            current.push(line);
-            continue;
+        let first = trimmed.chars().next();
+        if first == Some('`') || first == Some('~') {
+            let marker = first.unwrap();
+            let run = trimmed.chars().take_while(|&c| c == marker).count();
+            if run >= 3 {
+                fence = Some((marker, run));
+                current.push(line);
+                continue;
+            }
         }
 
         if line.trim().is_empty() {
