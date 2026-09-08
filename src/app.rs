@@ -6,11 +6,16 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
     DefaultTerminal, Frame,
 };
 use similar::{ChangeTag, TextDiff};
 use tui_textarea::TextArea;
+
+const ACCENT: Color = Color::Cyan;
+const MUTED: Color = Color::DarkGray;
+const DEL: Color = Color::Red;
+const ADD: Color = Color::Green;
 
 #[derive(PartialEq)]
 enum Mode {
@@ -160,66 +165,76 @@ impl App {
     }
 
     fn draw_chunk(&mut self, f: &mut Frame) {
-        let [title_a, orig_a, diff_a, edit_a, foot_a] = Layout::vertical([
+        let [title_a, body_a, foot_a] = Layout::vertical([
             Constraint::Length(1),
-            Constraint::Percentage(30),
-            Constraint::Percentage(22),
-            Constraint::Min(6),
+            Constraint::Min(0),
             Constraint::Length(1),
         ])
         .areas(f.area());
 
-        let title = format!(
-            " {} | chunk {}/{} ",
-            self.input_name,
-            self.idx + 1,
-            self.chunks.len()
-        );
-        f.render_widget(
-            Paragraph::new(title).style(Style::default().add_modifier(Modifier::BOLD)),
-            title_a,
-        );
+        self.draw_chunk_title(f, title_a);
 
-        let original = &self.chunks[self.idx];
-        f.render_widget(
-            Paragraph::new(original.as_str())
-                .wrap(Wrap { trim: false })
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Original (AI) ")
-                        .border_style(Style::default().fg(Color::DarkGray)),
-                ),
-            orig_a,
-        );
+        let original = self.chunks[self.idx].clone();
+        let diff = diff_lines(&original, &self.editor_text());
 
-        let diff = diff_lines(original, &self.editor_text());
-        f.render_widget(
-            Paragraph::new(diff)
-                .wrap(Wrap { trim: false })
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Diff (original vs yours) ")
-                        .border_style(Style::default().fg(Color::DarkGray)),
-                ),
-            diff_a,
-        );
+        let content_width = body_a.width.saturating_sub(2);
+        let diff_len: usize = diff
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.chars().count())
+            .sum();
+        let orig_h = wrapped_row_count(&original, content_width) + 2;
+        let diff_h = row_count_for_len(diff_len, content_width) + 2;
+        let [orig_a, diff_a, edit_a] = split_panes(body_a, orig_h, diff_h);
 
-        self.editor.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Your version ")
-                .border_style(Style::default().fg(Color::Cyan)),
-        );
+        let orig_para = Paragraph::new(original.as_str())
+            .wrap(Wrap { trim: false })
+            .block(panel_block("Original (AI)", false));
+        let diff_para = Paragraph::new(diff)
+            .wrap(Wrap { trim: false })
+            .block(panel_block("Diff", false));
+
+        f.render_widget(orig_para, orig_a);
+        f.render_widget(diff_para, diff_a);
+
+        self.editor.set_block(panel_block("Your version", true));
         f.render_widget(&self.editor, edit_a);
 
         f.render_widget(
-            Paragraph::new(
-                " Ctrl+S commit + next | Ctrl+K keep original | Ctrl+O copy original in | Ctrl+P back | Ctrl+Q quit ",
-            )
-            .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(hints(&[
+                ("Ctrl+S", "commit + next"),
+                ("Ctrl+K", "keep original"),
+                ("Ctrl+O", "copy original in"),
+                ("Ctrl+P", "back"),
+                ("Ctrl+Q", "quit"),
+            ])),
             foot_a,
+        );
+    }
+
+    fn draw_chunk_title(&self, f: &mut Frame, area: Rect) {
+        let counter = format!(" {}/{} ", self.idx + 1, self.chunks.len());
+        let bar_width: u16 = 20;
+        let counter_width = counter.len() as u16;
+        let [name_a, bar_a, counter_a] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(bar_width),
+            Constraint::Length(counter_width),
+        ])
+        .areas(area);
+
+        f.render_widget(
+            Paragraph::new(format!(" {}", self.input_name))
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+            name_a,
+        );
+        f.render_widget(
+            Paragraph::new(progress_bar(self.idx + 1, self.chunks.len(), bar_width)),
+            bar_a,
+        );
+        f.render_widget(
+            Paragraph::new(counter).style(Style::default().fg(MUTED)),
+            counter_a,
         );
     }
 
@@ -232,27 +247,28 @@ impl App {
         .areas(f.area());
 
         f.render_widget(
-            Paragraph::new(format!(
-                " Final preview | saving to {} ",
-                self.output.display()
-            ))
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    " Final preview ",
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("· saving to {}", self.output.display()),
+                    Style::default().fg(MUTED),
+                ),
+            ])),
             title_a,
         );
 
-        self.editor.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Full document (last minute edits here) ")
-                .border_style(Style::default().fg(Color::Green)),
-        );
+        self.editor.set_block(panel_block("Full document (last minute edits here)", true));
         f.render_widget(&self.editor, edit_a);
 
         f.render_widget(
-            Paragraph::new(
-                " Ctrl+S save and exit | Ctrl+P back to chunks (discards preview edits) | Ctrl+Q quit ",
-            )
-            .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(hints(&[
+                ("Ctrl+S", "save and exit"),
+                ("Ctrl+P", "back to chunks (discards preview edits)"),
+                ("Ctrl+Q", "quit"),
+            ])),
             foot_a,
         );
     }
@@ -270,6 +286,112 @@ fn make_editor(content: &str) -> TextArea<'static> {
     editor
 }
 
+fn panel_block(title: &str, focused: bool) -> Block<'static> {
+    let color = if focused { ACCENT } else { MUTED };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(format!(" {title} "))
+        .border_style(Style::default().fg(color))
+}
+
+/// Splits the chunk-view body into original/diff/editor areas. The original
+/// and diff panes are sized to their wrapped content (so a one-line paragraph
+/// doesn't reserve a third of the screen), capped at a share of the
+/// available height so the editor always keeps most of the room.
+fn split_panes(body: Rect, orig_h: u16, diff_h: u16) -> [Rect; 3] {
+    let avail = body.height;
+    let min_pane = 3u16;
+    let min_editor = 5u16;
+
+    let max_orig = ((avail as f32) * 0.42).round() as u16;
+    let max_diff = ((avail as f32) * 0.30).round() as u16;
+
+    let mut orig_h = orig_h.clamp(min_pane, max_orig.max(min_pane));
+    let mut diff_h = diff_h.clamp(min_pane, max_diff.max(min_pane));
+
+    let total_min = orig_h + diff_h + min_editor;
+    if total_min > avail {
+        let mut overflow = total_min - avail;
+
+        let diff_shrink = overflow.min(diff_h.saturating_sub(min_pane));
+        diff_h -= diff_shrink;
+        overflow -= diff_shrink;
+
+        let orig_shrink = overflow.min(orig_h.saturating_sub(min_pane));
+        orig_h -= orig_shrink;
+    }
+
+    let edit_h = avail.saturating_sub(orig_h + diff_h);
+
+    Layout::vertical([
+        Constraint::Length(orig_h),
+        Constraint::Length(diff_h),
+        Constraint::Length(edit_h),
+    ])
+    .areas(body)
+}
+
+/// Approximate greedy-wrapped row count for `text` at the given content
+/// width. Only used to size panes to their content, so exactness doesn't
+/// matter as much as staying in the right ballpark.
+fn wrapped_row_count(text: &str, width: u16) -> u16 {
+    text.split('\n')
+        .map(|line| row_count_for_len(line.chars().count(), width))
+        .sum::<u16>()
+        .max(1)
+}
+
+fn row_count_for_len(len: usize, width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    if len == 0 {
+        1
+    } else {
+        len.div_ceil(width) as u16
+    }
+}
+
+fn progress_bar(current: usize, total: usize, width: u16) -> Line<'static> {
+    let width = width.max(1) as usize;
+    let filled = if total == 0 {
+        0
+    } else {
+        ((current as f64 / total as f64) * width as f64).round() as usize
+    }
+    .min(width);
+
+    let mut spans = Vec::new();
+    if filled > 0 {
+        spans.push(Span::styled(
+            "━".repeat(filled),
+            Style::default().fg(ACCENT),
+        ));
+    }
+    if width > filled {
+        spans.push(Span::styled(
+            "━".repeat(width - filled),
+            Style::default().fg(MUTED),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Renders a row of key hints as `Key description  ·  Key description`.
+fn hints(pairs: &[(&str, &str)]) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (i, (key, desc)) in pairs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ·  ", Style::default().fg(MUTED)));
+        }
+        spans.push(Span::styled(
+            key.to_string(),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(format!(" {desc}"), Style::default().fg(MUTED)));
+    }
+    Line::from(spans)
+}
+
 /// Word-level diff rendered as one wrapped line. Whitespace is normalised
 /// to single spaces here; this pane is a visualisation, the real text
 /// lives in the original and editor panes.
@@ -280,11 +402,9 @@ fn diff_lines(original: &str, draft: &str) -> Vec<Line<'static>> {
     let mut spans = Vec::new();
     for change in diff.iter_all_changes() {
         let style = match change.tag() {
-            ChangeTag::Delete => Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::CROSSED_OUT),
-            ChangeTag::Insert => Style::default().fg(Color::Green),
-            ChangeTag::Equal => Style::default().fg(Color::DarkGray),
+            ChangeTag::Delete => Style::default().fg(DEL).add_modifier(Modifier::CROSSED_OUT),
+            ChangeTag::Insert => Style::default().fg(ADD),
+            ChangeTag::Equal => Style::default().fg(MUTED),
         };
         spans.push(Span::styled(format!("{} ", change.value()), style));
     }
@@ -300,7 +420,8 @@ fn draw_confirm_quit(f: &mut Frame) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Red)),
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(DEL)),
             ),
         area,
     );
